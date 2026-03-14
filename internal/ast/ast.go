@@ -223,3 +223,22 @@ type AssignmentExpression struct {
 
 func (a *AssignmentExpression) node()       {}
 func (a *AssignmentExpression) expression() {}
+
+// TemplateLiteral represents a template literal with interpolations
+type TemplateLiteral struct {
+	Parts       []string     // text segments (len = len(Expressions) + 1)
+	Expressions []Expression // interpolated expressions
+}
+
+func (t *TemplateLiteral) node()       {}
+func (t *TemplateLiteral) expression() {}
+
+// ArrowFunction represents an arrow function expression
+type ArrowFunction struct {
+	Params     []Parameter
+	ReturnType TypeNode
+	Body       Node // *BlockStatement or Expression (concise body)
+}
+
+func (a *ArrowFunction) node()       {}
+func (a *ArrowFunction) expression() {}

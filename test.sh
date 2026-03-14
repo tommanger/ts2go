@@ -11,7 +11,7 @@ echo "Build successful!"
 echo ""
 
 # Test all examples
-examples=("hello" "calculator" "fibonacci" "control-flow")
+examples=("hello" "calculator" "fibonacci" "control-flow" "template-literals" "arrow-functions")
 
 for example in "${examples[@]}"; do
     echo "Testing $example..."

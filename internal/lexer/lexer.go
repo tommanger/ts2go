@@ -6,12 +6,14 @@ import (
 )
 
 type Lexer struct {
-	input   string
-	pos     int  // current position
-	readPos int  // next reading position
-	ch      byte // current char
-	line    int
-	column  int
+	input         string
+	pos           int  // current position
+	readPos       int  // next reading position
+	ch            byte // current char
+	line          int
+	column        int
+	templateDepth int   // nesting depth of template literals
+	braceDepth    []int // brace depth stack for each template level
 }
 
 func New(input string) *Lexer {
@@ -141,8 +143,18 @@ func (l *Lexer) NextToken() Token {
 	case ')':
 		tok = Token{Type: TOKEN_RPAREN, Literal: ")", Line: tok.Line, Column: tok.Column}
 	case '{':
+		if l.templateDepth > 0 {
+			l.braceDepth[len(l.braceDepth)-1]++
+		}
 		tok = Token{Type: TOKEN_LBRACE, Literal: "{", Line: tok.Line, Column: tok.Column}
 	case '}':
+		if l.templateDepth > 0 && l.braceDepth[len(l.braceDepth)-1] == 0 {
+			// This closes a template expression ${...}, resume template scanning
+			return l.readTemplateMiddleOrTail(tok.Line, tok.Column)
+		}
+		if l.templateDepth > 0 {
+			l.braceDepth[len(l.braceDepth)-1]--
+		}
 		tok = Token{Type: TOKEN_RBRACE, Literal: "}", Line: tok.Line, Column: tok.Column}
 	case '[':
 		tok = Token{Type: TOKEN_LBRACKET, Literal: "[", Line: tok.Line, Column: tok.Column}
@@ -156,7 +168,9 @@ func (l *Lexer) NextToken() Token {
 		tok = Token{Type: TOKEN_COMMA, Literal: ",", Line: tok.Line, Column: tok.Column}
 	case '.':
 		tok = Token{Type: TOKEN_DOT, Literal: ".", Line: tok.Line, Column: tok.Column}
-	case '"', '\'', '`':
+	case '`':
+		return l.readTemplateLiteral(tok.Line, tok.Column)
+	case '"', '\'':
 		tok.Type = TOKEN_STRING
 		tok.Literal = l.readString(l.ch)
 	case 0:
@@ -249,4 +263,74 @@ func lookupKeyword(ident string) TokenType {
 		return tok
 	}
 	return TOKEN_IDENT
+}
+
+func (l *Lexer) readTemplateLiteral(line, col int) Token {
+	// We are positioned on the backtick character
+	l.readChar() // skip opening backtick
+
+	var text []byte
+	for l.ch != 0 {
+		if l.ch == '\\' {
+			text = append(text, l.ch)
+			l.readChar()
+			if l.ch != 0 {
+				text = append(text, l.ch)
+				l.readChar()
+			}
+			continue
+		}
+		if l.ch == '$' && l.peekChar() == '{' {
+			// Start of interpolation: emit TEMPLATE_HEAD
+			l.readChar() // skip $
+			l.readChar() // skip {
+			l.templateDepth++
+			l.braceDepth = append(l.braceDepth, 0)
+			return Token{Type: TOKEN_TEMPLATE_HEAD, Literal: string(text), Line: line, Column: col}
+		}
+		if l.ch == '`' {
+			// Closing backtick with no interpolation: emit as regular string
+			l.readChar() // skip closing backtick
+			return Token{Type: TOKEN_STRING, Literal: string(text), Line: line, Column: col}
+		}
+		text = append(text, l.ch)
+		l.readChar()
+	}
+
+	return Token{Type: TOKEN_ILLEGAL, Literal: "unterminated template literal", Line: line, Column: col}
+}
+
+func (l *Lexer) readTemplateMiddleOrTail(line, col int) Token {
+	// We are positioned on the } that closes a ${...} expression
+	l.readChar() // skip }
+
+	var text []byte
+	for l.ch != 0 {
+		if l.ch == '\\' {
+			text = append(text, l.ch)
+			l.readChar()
+			if l.ch != 0 {
+				text = append(text, l.ch)
+				l.readChar()
+			}
+			continue
+		}
+		if l.ch == '$' && l.peekChar() == '{' {
+			// Another interpolation: emit TEMPLATE_MIDDLE
+			l.readChar() // skip $
+			l.readChar() // skip {
+			return Token{Type: TOKEN_TEMPLATE_MIDDLE, Literal: string(text), Line: line, Column: col}
+		}
+		if l.ch == '`' {
+			// End of template literal: emit TEMPLATE_TAIL
+			l.readChar() // skip closing backtick
+			l.templateDepth--
+			l.braceDepth = l.braceDepth[:len(l.braceDepth)-1]
+			return Token{Type: TOKEN_TEMPLATE_TAIL, Literal: string(text), Line: line, Column: col}
+		}
+		text = append(text, l.ch)
+		l.readChar()
+	}
+
+	return Token{Type: TOKEN_ILLEGAL, Literal: "unterminated template literal", Line: line, Column: col}
 }

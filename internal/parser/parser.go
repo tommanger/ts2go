@@ -56,6 +56,15 @@ func (p *Parser) peek() lexer.Token {
 	return lexer.Token{Type: lexer.TOKEN_EOF}
 }
 
+func (p *Parser) save() int {
+	return p.pos
+}
+
+func (p *Parser) restore(pos int) {
+	p.pos = pos
+	p.current = p.tokens[pos]
+}
+
 func (p *Parser) expect(tokenType lexer.TokenType) error {
 	if p.current.Type != tokenType {
 		return fmt.Errorf("expected %s, got %s at line %d column %d",
@@ -704,9 +713,19 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.TOKEN_IDENT:
 		name := p.current.Literal
 		p.advance()
+		// Check for single-param arrow function: ident => ...
+		if p.current.Type == lexer.TOKEN_ARROW {
+			p.advance() // skip =>
+			return p.parseArrowBody([]ast.Parameter{{Name: name}}, nil)
+		}
 		return &ast.Identifier{Name: name}, nil
 
 	case lexer.TOKEN_LPAREN:
+		// Try to parse as arrow function using speculative parsing
+		if arrowFn, ok := p.tryParseArrowFunction(); ok {
+			return arrowFn, nil
+		}
+		// Fall back to grouped expression
 		p.advance()
 		expr, err := p.parseExpression()
 		if err != nil {
@@ -720,9 +739,113 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 	case lexer.TOKEN_LBRACKET:
 		return p.parseArrayLiteral()
 
+	case lexer.TOKEN_TEMPLATE_HEAD:
+		return p.parseTemplateLiteral()
+
 	default:
 		return nil, fmt.Errorf("unexpected token %s at line %d", p.current.Type, p.current.Line)
 	}
+}
+
+func (p *Parser) tryParseArrowFunction() (*ast.ArrowFunction, bool) {
+	saved := p.save()
+
+	// Try: ( params ) [: returnType] =>
+	p.advance() // skip (
+
+	params, err := p.parseParameters()
+	if err != nil {
+		p.restore(saved)
+		return nil, false
+	}
+
+	if p.current.Type != lexer.TOKEN_RPAREN {
+		p.restore(saved)
+		return nil, false
+	}
+	p.advance() // skip )
+
+	var returnType ast.TypeNode
+	if p.current.Type == lexer.TOKEN_COLON {
+		p.advance()
+		returnType, err = p.parseType()
+		if err != nil {
+			p.restore(saved)
+			return nil, false
+		}
+	}
+
+	if p.current.Type != lexer.TOKEN_ARROW {
+		p.restore(saved)
+		return nil, false
+	}
+	p.advance() // skip =>
+
+	arrowFn, err := p.parseArrowBody(params, returnType)
+	if err != nil {
+		p.restore(saved)
+		return nil, false
+	}
+
+	return arrowFn, true
+}
+
+func (p *Parser) parseArrowBody(params []ast.Parameter, returnType ast.TypeNode) (*ast.ArrowFunction, error) {
+	arrow := &ast.ArrowFunction{
+		Params:     params,
+		ReturnType: returnType,
+	}
+
+	if p.current.Type == lexer.TOKEN_LBRACE {
+		// Block body: => { ... }
+		block, err := p.parseBlockStatement()
+		if err != nil {
+			return nil, err
+		}
+		arrow.Body = block
+	} else {
+		// Concise body: => expression
+		expr, err := p.parseAssignment()
+		if err != nil {
+			return nil, err
+		}
+		arrow.Body = expr
+	}
+
+	return arrow, nil
+}
+
+func (p *Parser) parseTemplateLiteral() (*ast.TemplateLiteral, error) {
+	tmpl := &ast.TemplateLiteral{}
+
+	// Collect HEAD text
+	tmpl.Parts = append(tmpl.Parts, p.current.Literal)
+	p.advance()
+
+	for {
+		// Parse the interpolated expression
+		expr, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		tmpl.Expressions = append(tmpl.Expressions, expr)
+
+		if p.current.Type == lexer.TOKEN_TEMPLATE_MIDDLE {
+			tmpl.Parts = append(tmpl.Parts, p.current.Literal)
+			p.advance()
+			continue
+		}
+
+		if p.current.Type == lexer.TOKEN_TEMPLATE_TAIL {
+			tmpl.Parts = append(tmpl.Parts, p.current.Literal)
+			p.advance()
+			break
+		}
+
+		return nil, fmt.Errorf("expected template middle or tail at line %d", p.current.Line)
+	}
+
+	return tmpl, nil
 }
 
 func (p *Parser) parseArrayLiteral() (*ast.ArrayLiteral, error) {
